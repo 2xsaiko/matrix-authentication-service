@@ -5,9 +5,12 @@
 // Please see LICENSE files in the repository root for full details.
 
 use std::{
-    fs,
+    fs::File,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, ToSocketAddrs},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::{
+        fd::OwnedFd,
+        unix::{fs::PermissionsExt, net::UnixListener},
+    },
     time::Duration,
 };
 
@@ -398,16 +401,24 @@ pub fn build_listeners(
             HttpBindConfig::Unix { socket, mode } => {
                 let listener = UnixListener::bind(socket).context("could not bind socket")?;
 
-                if let Some(mode) = mode {
-                    let mut permissions = fs::metadata(socket)
-                        .context("could not read socket metadata")?
-                        .permissions();
-                    let mode = u32::from_str_radix(mode, 8)
-                        .with_context(|| format!("could not parse mode: {mode}"))?;
-                    permissions.set_mode(mode);
-                    fs::set_permissions(socket, permissions)
-                        .context("could not set socket permissions")?;
-                }
+                let listener = match mode {
+                    None => listener,
+                    Some(mode) => {
+                        let file = File::from(OwnedFd::from(listener));
+
+                        let mut permissions = file
+                            .metadata()
+                            .context("could not read socket metadata")?
+                            .permissions();
+                        let mode = u32::from_str_radix(mode, 8)
+                            .with_context(|| format!("could not parse mode: {mode}"))?;
+                        permissions.set_mode(mode);
+                        file.set_permissions(permissions)
+                            .context("could not set socket permissions")?;
+
+                        UnixListener::from(OwnedFd::from(file))
+                    }
+                };
 
                 listener.try_into()?
             }
